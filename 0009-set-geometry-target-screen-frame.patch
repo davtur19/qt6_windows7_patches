@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davtur19 <davtur19@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 12:00:00 +0100
+Subject: [PATCH] Compute the window frame for the target screen in setGeometry
+
+The window geometry may be applied while the window is still on a screen
+with a different DPI, so the system frame and the custom margins were
+computed for the source screen.
+
+If the target rect belongs to another screen, compute the system frame
+for that screen's DPI, scale the custom margins by the DPI ratio and
+adjust the rect so the client keeps its requested position and size.
+
+---
+ src/plugins/platforms/windows/qwindowswindow.cpp | 38 ++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/src/plugins/platforms/windows/qwindowswindow.cpp b/src/plugins/platforms/windows/qwindowswindow.cpp
+index 45ad9383772..e1326922a63 100644
+--- a/src/plugins/platforms/windows/qwindowswindow.cpp
++++ b/src/plugins/platforms/windows/qwindowswindow.cpp
+@@ -2280,6 +2280,44 @@ void QWindowsWindow::setGeometry(const QRect &rectIn)
+     QScopedValueRollback b(m_inSetgeometry, true);
+ 
+     QRect rect = rectIn;
++    if (m_data.hwnd) {
++        RECT nativeRect = {
++            rect.left(), rect.top(),
++            rect.right() + 1, rect.bottom() + 1
++        };
++        auto &screens = QWindowsContext::instance()->screenManager();
++        const auto targetScreen = screens.screenForRect(&nativeRect);
++        const auto currentScreen = screens.screenForHwnd(m_data.hwnd);
++        if (targetScreen && currentScreen && targetScreen != currentScreen) {
++            const auto targetDpi = targetScreen->logicalDpi().first;
++            const auto currentDpi = currentScreen->logicalDpi().first;
++            if (!qFuzzyCompare(targetDpi, currentDpi)) {
++                const auto scale = targetDpi / currentDpi;
++                const auto custom = m_data.customMargins;
++                const auto scaled = QMargins(
++                    qRound(custom.left() * scale),
++                    qRound(custom.top() * scale),
++                    qRound(custom.right() * scale),
++                    qRound(custom.bottom() * scale));
++                const auto style = DWORD(GetWindowLongPtr(m_data.hwnd, GWL_STYLE));
++                const auto exStyle = DWORD(GetWindowLongPtr(m_data.hwnd, GWL_EXSTYLE));
++                const auto currentSystem = QWindowsGeometryHint::frame(
++                    window(), m_data.hwnd, style, exStyle);
++                const auto targetSystem = QWindowsGeometryHint::frame(
++                    window(), style, exStyle, targetDpi);
++                m_data.customMargins = scaled;
++                rect += QMargins(
++                    targetSystem.left() - currentSystem.left()
++                        + scaled.left() - custom.left(),
++                    targetSystem.top() - currentSystem.top()
++                        + scaled.top() - custom.top(),
++                    targetSystem.right() - currentSystem.right()
++                        + scaled.right() - custom.right(),
++                    targetSystem.bottom() - currentSystem.bottom()
++                        + scaled.bottom() - custom.bottom());
++            }
++        }
++    }
+     // This means it is a call from QWindow::setFramePosition() and
+     // the coordinates include the frame (size is still the contents rectangle).
+     if (QWindowsGeometryHint::positionIncludesFrame(window())) {
