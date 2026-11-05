@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davtur19 <davtur19@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 16:10:00 +0100
+Subject: [PATCH] Re-apply the client geometry after a DPI change in setGeometry
+
+QWindowsWindow::setGeometry() computes the native window rectangle from the
+requested client rectangle and the full frame margins of the window's current
+screen. If the requested geometry is on a screen with a different DPI, the
+window is moved there by MoveWindow() and Windows recalculates the non-client
+area for the new DPI, while the window rectangle was built with the frame
+margins of the old DPI. The client area then ends up offset and resized by the
+frame delta; the wrong geometry is saved and restored again on the next start.
+
+handleDpiChanged() does not apply the suggested rectangle for a DPI change
+caused by setGeometry(), because Windows would scale the already scaled size
+once more. It must still update the frame margins and re-apply the requested
+client geometry, otherwise every cross-DPI setGeometry() leaves the client
+area at the wrong place.
+
+After the move, if the window DPI changed, recompute the full frame margins
+for the new DPI and apply the requested client rectangle again.
+
+Pick-to: 6.11
+---
+ src/plugins/platforms/windows/qwindowswindow.cpp | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/plugins/platforms/windows/qwindowswindow.cpp b/src/plugins/platforms/windows/qwindowswindow.cpp
+--- a/src/plugins/platforms/windows/qwindowswindow.cpp
++++ b/src/plugins/platforms/windows/qwindowswindow.cpp
+@@ -2335,8 +2335,18 @@
+         // achieve that size (for example, window title minimal constraint),
+         // notify and warn.
+         setFlag(WithinSetGeometry);
+-        setGeometry_sys(toFullScreenGeometry(rect));
++        const auto dpiBefore = savedDpi();
++        const auto fullScreenRect = toFullScreenGeometry(rect);
++        setGeometry_sys(fullScreenRect);
+         clearFlag(WithinSetGeometry);
++        if (savedDpi() != dpiBefore) {
++            // The window ended up on a screen with a different DPI, so the
++            // window rect above was computed with the frame margins of the
++            // old DPI. Re-apply the requested client geometry with the
++            // frame margins of the new DPI.
++            updateFullFrameMargins();
++            setGeometry_sys(fullScreenRect);
++        }
+         if (m_data.geometry != rect && (isVisible() || QLibraryInfo::isDebugBuild())) {
+             const auto warning =
+                 msgUnableToSetGeometry(this, rectIn, m_data.geometry,
+-- 
+2.43.0
