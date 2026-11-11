@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davtur19 <davtur19@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:00:00 +0100
+Subject: [PATCH] Compute the target screen frame in setGeometry
+
+QWindowsWindow::setGeometry() builds the window rect with the frame margins
+of the source screen. When the requested geometry is on a screen with a
+different DPI, the client area ends up offset by the difference between the
+source and target frames.
+
+Compute the system frame for the target screen and combine it with the custom
+margins, which the application refreshes for the target DPI (see the lib_ui
+WindowHelper::updateMargins change), before applying the client geometry. The
+geometry is then applied in a single move, without a preliminary move of the
+window.
+
+Pick-to: 6.12
+---
+ src/plugins/platforms/windows/qwindowswindow.cpp | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/src/plugins/platforms/windows/qwindowswindow.cpp b/src/plugins/platforms/windows/qwindowswindow.cpp
+index 4b52282..19ad1ef 100644
+--- a/src/plugins/platforms/windows/qwindowswindow.cpp
++++ b/src/plugins/platforms/windows/qwindowswindow.cpp
+@@ -2310,6 +2310,26 @@ void QWindowsWindow::setGeometry(const QRect &rectIn)
+     if (m_windowState & Qt::WindowMinimized)
+         m_data.geometry = rect; // Otherwise set by handleGeometryChange() triggered by event.
+     if (m_data.hwnd) {
++        if (!(m_data.flags & Qt::FramelessWindowHint)) {
++            RECT nativeRect = {
++                rect.left(), rect.top(),
++                rect.right() + 1, rect.bottom() + 1
++            };
++            auto &screens = QWindowsContext::instance()->screenManager();
++            const auto targetScreen = screens.screenForRect(&nativeRect);
++            const auto targetDpi = targetScreen
++                ? targetScreen->logicalDpi().first
++                : qreal(savedDpi());
++            const auto style = DWORD(GetWindowLongPtr(m_data.hwnd, GWL_STYLE));
++            const auto exStyle = DWORD(GetWindowLongPtr(m_data.hwnd, GWL_EXSTYLE));
++            const auto system = QWindowsGeometryHint::frame(
++                window(), style, exStyle, targetDpi);
++            const auto extended = (m_data.flags & Qt::ExpandedClientAreaHint)
++                ? qRound(QHighDpiScaling::factor(window())) * 2
++                : 0;
++            setFullFrameMargins(system + customMargins()
++                - QMargins(extended, extended, extended, extended));
++        }
+         // A ResizeEvent with resulting geometry will be sent. If we cannot
+         // achieve that size (for example, window title minimal constraint),
+         // notify and warn.
