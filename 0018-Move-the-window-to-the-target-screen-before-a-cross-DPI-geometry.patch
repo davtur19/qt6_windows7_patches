@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davtur19 <davtur19@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 12:00:00 +0100
+Subject: [PATCH] Move the window to the target screen before a cross-DPI geometry
+
+QWindowsWindow::setGeometry() builds the window rect with the frame margins
+of the current screen. If the requested geometry is on a screen with a
+different DPI, the move changes the window DPI and Windows recalculates the
+non-client area for the new DPI, so the client area ends up offset by the
+frame delta. handleDpiChanged() deliberately skips the suggested rectangle
+for this case, but the frame margins still have to be updated before the
+geometry is applied.
+
+Move the window to the target screen first, without changing its size, so
+that WM_DPICHANGED is delivered and the application can update its custom
+margins for the new DPI. Then apply the requested client geometry with the
+updated frame margins. This is the same ordering that was measured at 0 px
+for the Telegram Desktop restore case.
+
+Pick-to: 6.12
+---
+ src/plugins/platforms/windows/qwindowswindow.cpp | 27 +++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/src/plugins/platforms/windows/qwindowswindow.cpp b/src/plugins/platforms/windows/qwindowswindow.cpp
+index 4b52282..a441e57 100644
+--- a/src/plugins/platforms/windows/qwindowswindow.cpp
++++ b/src/plugins/platforms/windows/qwindowswindow.cpp
+@@ -2310,6 +2310,33 @@ void QWindowsWindow::setGeometry(const QRect &rectIn)
+     if (m_windowState & Qt::WindowMinimized)
+         m_data.geometry = rect; // Otherwise set by handleGeometryChange() triggered by event.
+     if (m_data.hwnd) {
++        // If the geometry is on a screen with a different DPI, move the window
++        // there first, so that Windows sends WM_DPICHANGED and the frame
++        // margins are updated for the new DPI before the geometry is applied.
++        if (!(m_data.flags & Qt::FramelessWindowHint)
++            && !IsZoomed(m_data.hwnd)
++            && !IsIconic(m_data.hwnd)
++            && !(m_windowState & (Qt::WindowMaximized | Qt::WindowMinimized | Qt::WindowFullScreen))) {
++            RECT nativeRect = { rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1 };
++            auto &screens = QWindowsContext::instance()->screenManager();
++            const auto targetScreen = screens.screenForRect(&nativeRect);
++            const auto currentScreen = screens.screenForHwnd(m_data.hwnd);
++            if (targetScreen && currentScreen && targetScreen != currentScreen) {
++                const auto targetDpi = targetScreen->logicalDpi().first;
++                const auto currentDpi = currentScreen->logicalDpi().first;
++                if (!qFuzzyCompare(targetDpi, currentDpi)) {
++                    RECT frame = {};
++                    POINT client = { 0, 0 };
++                    GetWindowRect(m_data.hwnd, &frame);
++                    ClientToScreen(m_data.hwnd, &client);
++                    const QPoint offset(client.x - frame.left, client.y - frame.top);
++                    SetWindowPos(m_data.hwnd, nullptr,
++                                 rect.x() - offset.x(), rect.y() - offset.y(),
++                                 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
++                    updateFullFrameMargins();
++                }
++            }
++        }
+         // A ResizeEvent with resulting geometry will be sent. If we cannot
+         // achieve that size (for example, window title minimal constraint),
+         // notify and warn.
